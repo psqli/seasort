@@ -27,7 +27,7 @@ N_CPU is the number of CPUs available for parallelizing work.
    1. Divide the stream in:  total_file_size / total_mem_available parts.
    2. Do in-memory merge as much as possible.
 
-Example of an 32GB file in a computer with 2GB of RAM and 4 CPUs:
+Example of an 32GB file in a computer with 2GB of RAM and 4 CPUs::
 
     __________32GB___________
     | A   : B   : C   : D   |  4 shards (of 8GB)  =  32GB (file size) / 4 (CPUs available)
