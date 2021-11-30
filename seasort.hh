@@ -5,16 +5,27 @@
 // se a block-merge sort distributed across shards.
 //
 
+#include <seastar/core/distributed.hh>
+#include <seastar/core/file.hh>
 #include <seastar/core/iostream.hh>
 
-using seastar::input_stream, seastar::output_stream;
+#include "seasort_shard.hh"
 
 namespace seastar {
+
+    struct seasort_state {
+        file input_file;
+        file output_file;
+        uint64_t block_size = 0;
+        uint64_t block_count = 0;
+        uint64_t blocks_per_shard = 0;
+        uint64_t remaining_blocks = 0;
+    };
 
     template<typename T>
     class seasort {
     public:
-        future<int>
-        sort_file(input_stream<char> unsorted_file, output_stream<char> sorted_file);
+        static future<int>
+        sort_file(file input_file, file output_file);
     };
 };
