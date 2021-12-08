@@ -5,40 +5,100 @@ Sharded, asynchronous, external, and (not yet in-place) merge sort.
 
 i.e.: merge sort for large files.
 
+
 Aims
 ====
 
 1. Lower bound for the number of assignments (write ops).
 
+
 Strategy
 ========
 
-N_CPU is the number of CPUs available for parallelizing work.
+Sharding
+   The number of shards is equal to the number of CPUs available. The
+   shards run parallel (simultaneous) tasks and do not share anything,
+   following the shared-nothing design from Seastar library.
 
-1. Distribute the file among CPUs (sharding):
+Sectioning
+   A single shard is logically divided into N sections, which are
+   continuously & asynchronously swapped to/from M slots preallocated
+   in memory. M should generally be much smaller than N.
 
-   1. Divide the file in N_CPU parts (the boundaries must be block aligned).
-   2. Start each CPU with a stream pointing to the start and going up to the
-      end of the CPU's part in the file.
+The diagram below illustrates what was defined::
+
+    _______________ _______________ _______________ _______________
+   |    Shard 0    |    Shard 1    |    Shard 2    |    Shard 3    |  64GB (file size)
+   |_______________|_______________|_______________|_______________|
+    _ _ _ _ _ _ _-´                 `-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+   ´_______ _______ _______ _______ _______ _______ _______ _______`
+   | Sec 0 | Sec 1 | Sec 2 | Sec 3 | Sec 4 | Sec 5 | Sec 6 | Sec 7 |  32GB (shard size)
+   |_______|_______|_______|_______|_______|_______|_______|_______|
+    _ _ _ _ _ _ _-´         `-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+   ´___ ___ ___ ___ ___ ___ ___ ___ ___ ___ _______________________`
+   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |         . . .         |   2GB (section size)
+   |___|___|___|___|___|___|___|___|___|___|_______________________|
+
+M = available_memory / section_size
+
+TODO: Fix some of the descriptions below.
+
+An optimal number of slots M will prevent the CPU from idling/waiting
+for a buffered read operation before start merging. In other words, this
+allows the CPU to work while the disk is fetching data. The number of
+sections is not defined by the program because there must be a balance
+between the overheads from disk access and cpu merge speed.
+
+The loop of a single CPU is:
+
+1. Request read of (M - pending) sections from disk.
+2. Wait for a single section to be ready.
+3. Merge section.
+4. Request write of the merged section to disk.
+5. Go to 1.
+
+Based on the above scenario, the following assumptions are made:
+
+- A shard may be much larger than the RAM available to merge it.
+- Each CPU will be ordering at most M sections at a time.
+
+I.e. A Binary Merge Tree (BMT) for parallel merging
+---------------------------------------------------
+
+There are two steps involved::
+
+            ___|__|___
+           /          \
+      ___|__|___       \____
+     /          \           \
+   |__|        |__|        |__|
+  /    \      /    \      /    \
+|__|  |__|  |__|  |__|  |__|  |__|
+
+1. Merge blocks from one shard.
+2. Merge blocks from two shards.
+
+The first step is where the maximum parellelism is achieved. Every cpu is
+merging blocks from its own shard.
 
 
-2. Single CPU work on a stream
+Merge sections
+==============
 
-   1. Divide the stream in:  total_file_size / total_mem_available parts.
-   2. Do in-memory merge as much as possible.
+For example, if there are 2GB of memory available for each shard, a merge
+section might be 500MB -- and the shard will have 4 merge sections.
 
-Example of an 512GB file in a computer with 8GB of RAM and 4 CPUs::
+Merge sections are constant in size.
 
-    _________512GB___________
-    |_A___:_B___:_C___:_D___|  4 shards of 128GB each
-         /       \
-        /         \
-       /           \
-      /             \
-     /_____128GB_____\
-    |__0__:.....:_63__:  64 partitions of 2GB each
+4 parallel reads are issued to disk. Each time a merge section is fully merged,
+a new read is issued for the next section.
 
-Each CPU will be ordering at most 2GB at a time.
+
+Further improvements
+===============================================
+
+- in-place merge
+
 
 Background
 ==========

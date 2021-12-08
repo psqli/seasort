@@ -9,8 +9,6 @@
 #include <seastar/core/file.hh>
 #include <seastar/core/iostream.hh>
 
-#include "seasort_shard.hh"
-
 namespace seastar {
 
     struct seasort_state {
@@ -19,7 +17,10 @@ namespace seastar {
         uint64_t block_size = 0;
         uint64_t block_count = 0;
         uint64_t blocks_per_shard = 0;
-        uint64_t remaining_blocks = 0;
+        uint64_t blocks_per_shard_remainder = 0;
+
+        uint64_t section_count = 16;
+        uint64_t section_block_count = 512;
     };
 
     template<typename T>
