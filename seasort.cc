@@ -29,7 +29,6 @@ seasort<T>::sort_file(file &input_file, file &output_file)
     st.file_size = file_size;
     st.block_size = block_size;
     st.block_count = file_size / block_size;
-    st.shard_count = smp::count;
     st.blocks_per_shard = block_count / smp::count;
     // Each shard will read a portion of the input file.
     // FIXME: handle when block_count is less than shard_count

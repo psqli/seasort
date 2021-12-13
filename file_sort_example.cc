@@ -1,5 +1,6 @@
 
 #include <algorithm>
+#include <cstdint>
 #include <execution>
 #include <string>
 
@@ -12,19 +13,19 @@
 #include <seastar/core/temporary_buffer.hh>
 
 #include "seasort.hh"
+#include "seastar/core/shared_ptr.hh"
 
 using namespace seastar;
 
 using std::lexicographical_compare;
 
-class block
+struct block
 {
-private:
-    temporary_buffer<char> _buf;
-
-public:
-    block(temporary_buffer<char>&& buf) : _buf(std::move(buf)) {}
-    block(size_t size) : _buf(size) {}
+    block(temporary_buffer<char> &buf)
+        : _buf(buf)
+    {
+        // nothing
+    }
 
     bool operator ==(const block &other) const
     {
@@ -57,6 +58,9 @@ public:
     {
         return !(*this < other);
     }
+
+private:
+    temporary_buffer<char> &_buf;
 };
 
 
