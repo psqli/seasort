@@ -62,55 +62,79 @@ seasort_shard<T>::prepare()
 struct block_iterator {
 private:
     input_stream<char> &_stream;
-    uint64_t const _block_size;
-    temporary_buffer<char> _buf;
+    const uint64_t _bytes_per_block;
+    const uint64_t _blocks_per_section;
+    const uint64_t _blocks_per_stream;
+    temporary_buffer<char> _section_buf;
     uint64_t _current_block;
     bool _read_next_section = true;
 public:
-    block_iterator(input_stream<char> &stream, uint64_t block_size)
+    block_iterator(input_stream<char> &stream, uint64_t bytes_per_block, uint64_t blocks_per_section, uint64_t blocks_per_stream)
         : _stream(stream)
-        , _buf()
-        , _block_size(block_size)
+        , _bytes_per_block(bytes_per_block)
+        , _blocks_per_section(blocks_per_section)
+        , _blocks_per_stream(blocks_per_stream)
         , _current_block(0)
+        , _section_buf()
     {}
 
     block_iterator& operator ++()
     {
-        uint64_t next_pos = _current_block + 1;
-        if (next_pos < _buf.size()) {
-            _current_block = next_pos;
+        uint64_t next_within_section = (_current_block % _blocks_per_section) + 1;
+        if (next_within_section < _blocks_per_section) {
+            _current_block++;
         } else {
             _read_next_section = true;
         }
         return *this;
     }
 
-    operator future<temporary_buffer<char>>()
+    bool
+    has_next()
     {
-        if (_read_next_section) {
+        uint64_t next_block = _current_block + 1;
+        return next_block < _blocks_per_stream;
+    }
+
+    operator bool()
+    {
+        return _section_buf.size();
+    }
+
+    future<temporary_buffer<char>>
+    get()
+    {
+        uint64_t current_block_within_section = _current_block % _blocks_per_section;
+        if (_current_block >= _blocks_per_stream) {
+            // reached the end of stream: return empty buffer
+            co_return temporary_buffer<char>();
+        } else if (current_block_within_section >= _blocks_per_section) {
+            // reached the end of section: await another section and copy it to _section_buffer
+            // The input stream is responsible for launching one or more read ahead requests.
+            _section_buf = co_await _stream.read_exactly(_bytes_per_block * _blocks_per_section);
             _read_next_section = false;
-            _buf = co_await _stream.read_exactly(_block_size * 1000 /* TODO: blocks per section */);
-            // The stream is responsible for launching one or more read ahead requests.
         }
         // copy elision with Return Value Optimization?
-        co_return temporary_buffer(_buf.get_write() + _current_block, _block_size);
+        co_return temporary_buffer(_section_buf.get_write() + current_block_within_section * _bytes_per_block, _bytes_per_block);
     }
 };
 
 template<typename T>
-future<>
-merge_async(block_iterator it_a, block_iterator it_b, output_stream<char> out)
+future<output_stream<char>&>
+merge_async(block_iterator it_a, block_iterator it_b, output_stream<char> &out)
 {
-    while (1) {
-        T a(co_await it_a);
-        T b(co_await it_b);
-
-        if (a < b) {
-            co_await out.write(it_a++);
+    while (it_a.has_next() && it_b.has_next()) {
+        auto a{co_await it_a.get()}, b(co_await it_b.get());
+        if (T(a) <= T(b)) { // less_equal operator guarantees stable sort
+            co_await out.write(a.get(), a.size());
+            ++it_a;
         } else {
-            co_await out.write(it_b++);
+            co_await out.write(b.get(), b.size());
+            ++it_b;
         }
     }
+
+    co_return out;
 }
 
 template<typename T>
@@ -137,6 +161,7 @@ seasort_shard<T>::sort_file()
     }
 
     // Now, merge sections
+
     merge_async();
 
     // TODO: when ready, send a message to the core which will merge the result from this core with theirs.
