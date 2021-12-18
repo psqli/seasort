@@ -25,7 +25,6 @@ namespace seastar {
 
         /// Defines how many sections can be simultaneously read from the input file.
         /// This allows disk to read while the CPU is merging.
-        uint max_sections_in_memory = 2;
 
 
         // Shard parameters
@@ -35,16 +34,14 @@ namespace seastar {
         /// total_blocks / smp::count may have a remainder, which will be added to the last shard.
         uint64_t blocks_per_shard_remainder = 0;
 
-        uint64_t sections_per_shard = 16;
 
-
-        // Section parameters
+        // Buffer parameters
         // ==============================================================
 
-        uint64_t blocks_per_section = 512;
+        uint64_t blocks_per_buffer = 512;
 
-        uint64_t get_bytes_per_section() const {
-            return blocks_per_section * bytes_per_block;
+        uint64_t get_bytes_per_buffer() const {
+            return blocks_per_buffer * bytes_per_block;
         }
     };
 
@@ -54,6 +51,6 @@ namespace seastar {
         struct seasort_state _state;
     public:
         static future<int>
-        sort_file(file input_file, file output_file);
+        sort_file(file &input_file, file &output_file);
     };
 };
