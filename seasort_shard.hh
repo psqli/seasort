@@ -16,9 +16,6 @@ template<typename T>
 class seasort_shard {
 private:
 
-    input_stream<char> _input;
-    output_stream<char> _output;
-
     seasort_state &_state;
 
     uint64_t _first_block;

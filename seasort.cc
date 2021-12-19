@@ -22,7 +22,7 @@ seasort<T>::sort_file(file &input_file, file &output_file)
     struct seasort_state st;
 
     uint64_t file_size = co_await input_file.size();
-    st.bytes_per_block = T::size;
+    st.bytes_per_block = T::size; // TODO: require minimum size (e.g. 4096 or 512) for alignment-friendly
     st.total_blocks = file_size / st.bytes_per_block;
     assert(("Must have at least two blocks", st.total_blocks > 1));
 
