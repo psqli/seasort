@@ -1,5 +1,6 @@
 
 #include <boost/range/irange.hpp>
+#include <cassert>
 #include <concepts>
 #include <cstdint>
 
@@ -103,8 +104,14 @@ public:
                     .read_ahead = fr._read_ahead /* TODO: maximize memory usage here */,
             }))) { }
 
+    block_range_iterator
+    get_range(uint64_t block_offset, uint64_t block_count) {
+        assert(block_offset >= _fr._block_offset && block_count <= _fr._block_count);
+        return block_range_iterator(_fr, block_offset, block_count);
+    }
+
     /// Return a new block_range_iterator
-    future<block_range_iterator>
+    block_range_iterator
     next_range() {
         auto next_range_block_offset = _block_offset + _block_count;
         auto next_range_block_count = std::min(_block_count, _fr._block_count - next_range_block_offset);
@@ -118,9 +125,10 @@ public:
             next_range._range = std::move(_range);
         }
 
-        co_return next_range;
+        return next_range;
     }
 
+    /// Split the block range iterator into two parts. The split is done in the middle of the range.
     std::pair<block_range_iterator, block_range_iterator>
     split() {
         return {
@@ -175,6 +183,11 @@ public:
             co_return co_await _range.read_exactly(_fr._block_size);
         }
     }
+
+    future<output_stream<char>>
+    get_output_stream() {
+        co_return co_await api_v3::make_file_output_stream(_fr._file);
+    }
 };
 
 block_range_iterator
@@ -185,7 +198,7 @@ make_block_range_iterator(file &file, uint64_t bytes_per_block, uint64_t block_o
 
 template<typename T>
 future<block_range_iterator>
-merge_async(block_range_iterator it_a, block_range_iterator it_b, file &aux)
+merge_async(block_range_iterator it_a, block_range_iterator it_b, output_stream<char> out)
 {
     while (it_a.has_block() && it_b.has_block()) {
         auto a(co_await it_a.get_block()), b(co_await it_b.get_block());
@@ -214,7 +227,7 @@ merge_async(block_range_iterator it_a, block_range_iterator it_b, file &aux)
 // invariant: merges do not overlap and do not happen simultaneously or concurrently
 template<typename T>
 future<block_range_iterator>
-depth_first_merge_sort(block_range_iterator a, file &aux)
+depth_first_merge_sort(block_range_iterator a, block_range_iterator aux)
 {
     if (a.size() == 1)
         co_return a; // RVO must happen here as member _buffer is not copyable
@@ -224,16 +237,19 @@ depth_first_merge_sort(block_range_iterator a, file &aux)
                                       aux);
 }
 
+template<typename T>
 future<>
-breadth_first_merge_sort(block_range_iterator it, file &aux) {
-    _output = co_await make_file_output_stream(_state.output_file, file_output_stream_options({
-        .buffer_size = static_cast<unsigned int>(_state.get_bytes_per_buffer()),
-        .write_behind = _state.max_buffers_in_memory,
-    }));
+breadth_first_merge_sort(block_range_iterator it, block_range_iterator it_out) {
+    uint64_t range_size = 1;
     while (true) {
-        auto it_a(it), it_b(it);
-        auto it_out(it);
-        merge_async<T>(it_a, it_b, it_out);
+        auto out = co_await it_out.get_output_stream();
+        range_size *= 2;
+        auto cur = it.get_range(0, range_size);
+        while (true) {
+            cur = cur.next_range();
+            auto it_a(it.next_range());
+            //merge_async<T>(it_a, it_b, out);
+        }
         // change file
     }
 }
@@ -242,9 +258,10 @@ template<typename T>
 future<>
 seasort_shard<T>::sort_file()
 {
-    auto it = co_await make_block_range_iterator(_state.input_file, _state.bytes_per_block, _first_block, _shard_block_count, 16 /* TODO: what value */);
+    auto it = make_block_range_iterator(_state.input_file, _state.bytes_per_block, _first_block, _shard_block_count, 16 /* TODO: what value */);
+    auto out = make_block_range_iterator(_state.output_file, _state.bytes_per_block, _first_block, _shard_block_count, 16 /* TODO: what value */);
 
-    breadth_first_merge_sort(it);
+    breadth_first_merge_sort(it, out);
 
     // TODO: when ready, send a message to the core which will merge the result from this core with theirs.
     // The message should pass a reference to the local buffer, so the other cpu can use it.
