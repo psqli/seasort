@@ -113,14 +113,14 @@ public:
         return block_range_iterator(_fr, block_offset, block_count);
     }
 
-    /// Return a new block_range_iterator
+    /// Go to the next block_range available.
     void
     next_range() {
         auto next_range_block_offset = _block_offset + _block_count;
         auto next_range_block_count = std::min(_block_count, _fr._block_count - next_range_block_offset);
         block_range_iterator next_range(_fr, next_range_block_offset, next_range_block_count);
 
-        // If next_range a pure in-memory range, store a future for the read.
+        // If next_range is a pure in-memory range, store a future for the read.
         // The rationale is that if a range can be entirely in-memory, it's
         // not necessary to create a separate input stream for the next
         // range.
@@ -134,6 +134,7 @@ public:
     split() {
         auto it_a = get_range(_block_offset, _block_count/2);
         auto it_b = get_range(_block_offset + _block_count/2, _block_count - _block_count/2);
+        // TODO: define async_buffer when block_count <= blocks_per_buffer
         return {
             block_range_iterator(_fr, _block_offset, _block_count/2),
             block_range_iterator(_fr, _block_offset + _block_count/2, _block_count - _block_count/2),
