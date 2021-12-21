@@ -15,6 +15,7 @@
 #include "seasort.hh"
 #include "seasort_shard.hh"
 #include "seastar/core/fstream.hh"
+#include "seastar/core/future.hh"
 #include "seastar/core/shared_ptr.hh"
 #include "seastar/core/temporary_buffer.hh"
 #include "seastar/core/when_all.hh"
@@ -84,6 +85,7 @@ class block_range_iterator {
     const uint64_t _block_count;
 
     input_stream<char> _range;
+    future<temporary_buffer<char>> _async_buffer;
     temporary_buffer<char> _buffer;
 
     uint64_t _current_block = 0;
@@ -96,6 +98,7 @@ public:
         : _fr(fr)
         , _block_offset(block_offset)
         , _block_count(block_count)
+        , _async_buffer(make_ready_future<temporary_buffer<char>>())
         , _range(
             make_file_input_stream(fr._file, block_offset * fr._block_size,
                 std::min(block_count * fr._block_size, fr._read_ahead * fr._block_size),
@@ -111,26 +114,26 @@ public:
     }
 
     /// Return a new block_range_iterator
-    block_range_iterator
+    void
     next_range() {
         auto next_range_block_offset = _block_offset + _block_count;
         auto next_range_block_count = std::min(_block_count, _fr._block_count - next_range_block_offset);
         block_range_iterator next_range(_fr, next_range_block_offset, next_range_block_count);
 
-        // If next_range is an in-memory range, move the input stream to it.
+        // If next_range a pure in-memory range, store a future for the read.
         // The rationale is that if a range can be entirely in-memory, it's
         // not necessary to create a separate input stream for the next
         // range.
         if (_block_count <= /* TODO: blocks_per_buffer */) {
-            next_range._range = std::move(_range);
+            next_range._async_buffer = _range.read_exactly(_block_count * _fr._block_size);
         }
-
-        return next_range;
     }
 
     /// Split the block range iterator into two parts. The split is done in the middle of the range.
     std::pair<block_range_iterator, block_range_iterator>
     split() {
+        auto it_a = get_range(_block_offset, _block_count/2);
+        auto it_b = get_range(_block_offset + _block_count/2, _block_count - _block_count/2);
         return {
             block_range_iterator(_fr, _block_offset, _block_count/2),
             block_range_iterator(_fr, _block_offset + _block_count/2, _block_count - _block_count/2),
@@ -147,6 +150,7 @@ public:
     }
 
     block_range_iterator& operator++ () {
+        _async_buffer.get();
         if (_buffer.size())
             _buffer.trim_front(_fr._block_size);
         else
@@ -244,11 +248,12 @@ breadth_first_merge_sort(block_range_iterator it, block_range_iterator it_out) {
     while (true) {
         auto out = co_await it_out.get_output_stream();
         range_size *= 2;
-        auto cur = it.get_range(0, range_size);
+        auto current_range = it.get_range(0, range_size);
         while (true) {
-            cur = cur.next_range();
-            auto it_a(it.next_range());
-            //merge_async<T>(it_a, it_b, out);
+            auto splitted = current_range.split();
+            auto it_a(std::move(splitted.first)), it_b(std::move(splitted.second));
+            merge_async<T>(it_a, it_b, out);
+            current_range.next_range();
         }
         // change file
     }

@@ -26,8 +26,8 @@ seasort<T>::sort_file(file &input_file, file &output_file)
     st.total_blocks = file_size / st.bytes_per_block;
     assert(("Must have at least two blocks", st.total_blocks > 1));
 
-    st.input_file = std::move(input_file);
-    st.output_file = std::move(output_file);
+    st.input_file = input_file;
+    st.output_file = output_file;
 
     st.blocks_per_shard = st.total_blocks / smp::count;
     // Each shard will read a portion of the input file.
