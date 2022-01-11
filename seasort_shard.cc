@@ -1,24 +1,11 @@
 
-#include <boost/range/irange.hpp>
-#include <cassert>
-#include <concepts>
-#include <cstdint>
-
-#include <cstdlib>
-#include <seastar/core/circular_buffer.hh>
-#include <seastar/core/coroutine.hh>
-#include <seastar/core/iostream.hh>
-#include <seastar/core/seastar.hh>
+// Seastar headers
 #include <seastar/core/smp.hh>
-#include <utility>
 
+// Local headers
+#include "block_range_iterator.hh"
 #include "seasort.hh"
 #include "seasort_shard.hh"
-#include "seastar/core/fstream.hh"
-#include "seastar/core/future.hh"
-#include "seastar/core/shared_ptr.hh"
-#include "seastar/core/temporary_buffer.hh"
-#include "seastar/core/when_all.hh"
 
 using std::vector;
 using std::inplace_merge;
@@ -49,158 +36,6 @@ seasort_shard<T>::seasort_shard(seasort_state &state) :
 
 //using range = boost::integer_range<uint64_t>;
 
-struct file_range {
-    file &_file;
-    const uint64_t _block_size;
-    const uint64_t _block_offset;
-    const uint64_t _block_count;
-    const uint _read_ahead;
-    file_range(file &file, uint64_t block_size, uint64_t block_offset, uint64_t block_count, uint read_ahead)
-        : _file(file)
-        , _block_size(block_size)
-        , _block_offset(block_offset)
-        , _block_count(block_count)
-        , _read_ahead(read_ahead)
-        { }
-
-    /// Changes the data source without resetting the range parameters.
-    /// Returns the current file reference.
-    file& change_file(file &new_file_ref) {
-        file& old_file_ref = _file;
-        _file = new_file_ref;
-        return old_file_ref;
-    }
-};
-
-// this iterator is an effort for reading a file sequentially while allowing to split and skip
-// ranges efficiently
-//
-//   max blocks in memory (per iterator)       max blocks for pure
-//   -----------------------------------   =   in-memory range
-//           min read ahead
-class block_range_iterator {
-    file_range _fr;
-
-    const uint64_t _block_offset;
-    const uint64_t _block_count;
-
-    input_stream<char> _range;
-    future<temporary_buffer<char>> _async_buffer;
-    temporary_buffer<char> _buffer;
-
-    uint64_t _current_block = 0;
-    int64_t _prev_block = -1;
-
-    uint64_t _blocks_to_skip = 0;
-
-public:
-    block_range_iterator(file_range fr, uint64_t block_offset, uint64_t block_count)
-        : _fr(fr)
-        , _block_offset(block_offset)
-        , _block_count(block_count)
-        , _async_buffer(make_ready_future<temporary_buffer<char>>())
-        , _range(
-            make_file_input_stream(fr._file, block_offset * fr._block_size,
-                std::min(block_count * fr._block_size, fr._read_ahead * fr._block_size),
-                file_input_stream_options({
-                    .buffer_size = fr._block_size,
-                    .read_ahead = fr._read_ahead /* TODO: maximize memory usage here */,
-            }))) { }
-
-    block_range_iterator
-    get_range(uint64_t block_offset, uint64_t block_count) {
-        assert(block_offset >= _fr._block_offset && block_count <= _fr._block_count);
-        return block_range_iterator(_fr, block_offset, block_count);
-    }
-
-    /// Go to the next block_range available.
-    void
-    next_range() {
-        auto next_range_block_offset = _block_offset + _block_count;
-        auto next_range_block_count = std::min(_block_count, _fr._block_count - next_range_block_offset);
-        block_range_iterator next_range(_fr, next_range_block_offset, next_range_block_count);
-
-        // If next_range is a pure in-memory range, store a future for the read.
-        // The rationale is that if a range can be entirely in-memory, it's
-        // not necessary to create a separate input stream for the next
-        // range.
-        if (_block_count <= /* TODO: blocks_per_buffer */) {
-            next_range._async_buffer = _range.read_exactly(_block_count * _fr._block_size);
-        }
-    }
-
-    /// Split the block range iterator into two parts. The split is done in the middle of the range.
-    std::pair<block_range_iterator, block_range_iterator>
-    split() {
-        auto it_a = get_range(_block_offset, _block_count/2);
-        auto it_b = get_range(_block_offset + _block_count/2, _block_count - _block_count/2);
-        // TODO: define async_buffer when block_count <= blocks_per_buffer
-        return {
-            block_range_iterator(_fr, _block_offset, _block_count/2),
-            block_range_iterator(_fr, _block_offset + _block_count/2, _block_count - _block_count/2),
-        };
-    }
-
-    uint64_t size() {
-        return _block_count;
-    }
-
-    bool
-    has_block() {
-        return _current_block < _block_count;
-    }
-
-    block_range_iterator& operator++ () {
-        _async_buffer.get();
-        if (_buffer.size())
-            _buffer.trim_front(_fr._block_size);
-        else
-            _blocks_to_skip++;
-        return *this;
-    }
-
-    block_range_iterator operator++ (int) {
-        block_range_iterator copy(_fr, _block_offset + _current_block, _block_count - _current_block);
-        copy._buffer = _buffer.clone();
-        ++*this;
-        return copy;
-    }
-
-    /// Get the current block. The future resolves immediately if the current block is already in memory.
-    /// This does not increment the iterator, so calling it twice in a row will return the same block.
-    future<temporary_buffer<char>>
-    get_block() {
-        // if previously incremented, here the blocks are skipped
-        if (_blocks_to_skip) {
-            auto blocks_in_buffer = _buffer.size() / _fr._block_size;
-            int64_t bytes_diff = (blocks_in_buffer - _blocks_to_skip) * _fr._block_size;
-            _buffer.trim_front(std::max(bytes_diff, 0L));
-            // skip input_stream if needed
-            if (bytes_diff < 0)
-                co_await _range.skip(abs(bytes_diff));
-            _blocks_to_skip = 0;
-        }
-        // input_stream already does buffering. However, the buffering done here is to allow in-memory
-        // iterators to be used when the range size is too small.
-        if (_buffer.size()) {
-            co_return _buffer.share(0, _fr._block_size);
-        } else {
-            co_return co_await _range.read_exactly(_fr._block_size);
-        }
-    }
-
-    future<output_stream<char>>
-    get_output_stream() {
-        co_return co_await api_v3::make_file_output_stream(_fr._file);
-    }
-};
-
-block_range_iterator
-make_block_range_iterator(file &file, uint64_t bytes_per_block, uint64_t block_offset, uint64_t block_count, uint read_ahead) {
-    auto fr = file_range(file, bytes_per_block, block_offset, block_count, read_ahead);
-    return block_range_iterator(std::move(fr), block_offset, block_count);
-}
-
 template<typename T>
 future<block_range_iterator>
 merge_async(block_range_iterator it_a, block_range_iterator it_b, output_stream<char> out)
@@ -209,10 +44,8 @@ merge_async(block_range_iterator it_a, block_range_iterator it_b, output_stream<
         auto a(co_await it_a.get_block()), b(co_await it_b.get_block());
         if (T(a) <= T(b)) { // less_equal operator guarantees stable sort
             co_await out.write(a.get(), a.size());
-            ++it_a;
         } else {
             co_await out.write(b.get(), b.size());
-            ++it_b;
         }
     }
 
@@ -249,17 +82,19 @@ breadth_first_merge_sort(block_range_iterator it, block_range_iterator it_out) {
     while (true) {
         auto out = co_await it_out.get_output_stream();
         range_size *= 2;
-        auto current_range = it.get_range(0, range_size);
+        auto current_range = it.get_subrange(0, range_size);
         while (true) {
             auto splitted = current_range.split();
             auto it_a(std::move(splitted.first)), it_b(std::move(splitted.second));
             merge_async<T>(it_a, it_b, out);
-            current_range.next_range();
+            current_range.get_next_range();
         }
         // change file
     }
 }
 
+// read_ahead defines the maximum memory reserved for each iterator
+// For seasort, there are at most two iterators active at a time.
 template<typename T>
 future<>
 seasort_shard<T>::sort_file()
